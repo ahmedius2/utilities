@@ -50,6 +50,8 @@
 
 #include "autoware_msgs/DetectedObjectArray.h"
 
+#define arr_size 50
+
 class ROSLidarTrackletCompareApp
 {
   ros::NodeHandle node_handle_;
@@ -66,6 +68,11 @@ class ROSLidarTrackletCompareApp
 
   std::mutex manual_sync_mutex_;
   double overlap_threshold_;
+
+  std::vector<std::pair<unsigned,unsigned>> detected_car_stats_per_frame_;
+  std::array<unsigned,arr_size> iou_histogram_of_detected_ = {0};
+  std::array<unsigned,arr_size> distance_histogram_of_detected_ = {0};
+  std::array<unsigned,arr_size> distance_histogram_of_missed_ = {0};
 
   typedef
   message_filters::sync_policies::ApproximateTime<autoware_msgs::DetectedObjectArray,
@@ -91,18 +98,31 @@ class ROSLidarTrackletCompareApp
               const autoware_msgs::DetectedObject &in_object1,
               const autoware_msgs::DetectedObject &in_object2);
 
-  double polygonArea(jsk_recognition_utils::Vertices &vertices);
+  void GetIntersectionPoints(
+    jsk_recognition_utils::Vertices &out_intersect_points,
+    const jsk_recognition_utils::Vertices &rect1_v,
+    const jsk_recognition_utils::Vertices &rect2_v
+  );
+
+  void GetEncapsulatedPoints(
+    std::list<jsk_recognition_utils::Vertices> &out_encapsulated_rect2_v_l,
+    const jsk_recognition_utils::Vertices &rect1_v,
+    const jsk_recognition_utils::Vertices &rect2_v,
+    const double rect1_area=0
+  );
+
+  double polygonArea(const jsk_recognition_utils::Vertices &vertices);
 
   void populateVertices(
-          jsk_recognition_utils::Vertices &vertices,
-          float distBetweenNeighboorPointsInMeters);
-
-  void getXYLimitsOfVertices(
           const jsk_recognition_utils::Vertices &vertices,
-          std::array<float,4> &out_limits);
+          const float distBetweenNeighboorPointsInMeters,
+          jsk_recognition_utils::Vertices &out_populated_vertices);
 
-  inline bool is2DPointInsideLimits(
-          const jsk_recognition_utils::Point &p, const std::array<float,4> &in_limits);
+
+  inline bool is2DPointInsideRectangle(
+          const jsk_recognition_utils::Point &p,
+          const jsk_recognition_utils::Vertices &vertices,
+          const double rect_area=0);
 
   jsk_recognition_utils::Vertices getVerticesOf3DObject(
           const autoware_msgs::DetectedObject &in_object);

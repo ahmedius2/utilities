@@ -80,31 +80,41 @@ ROSLidarTrackletCompareApp::MatchDetectionsAndTracklets(
     std::vector<bool> is_tracklet_detected(in_tracklets_msg->objects.size(), false);
     auto& tracklets = in_tracklets_msg->objects;
 
-    for (auto obj : in_detections_msg->objects){
-        bool matched = false;
-        for(auto i=0; i<tracklets.size(); ++i ){
-            if(is_tracklet_detected[i])
-                continue;
+    unsigned detected_cars_in_this_frame=0;
 
-            auto tracklet = tracklets[i];
-            // this is inneficient but lets stick like this for now
-            double uio = Get2DIoUOfObjects(obj, tracklet);
-            if(uio > overlap_threshold_){
+    for (auto obj : in_detections_msg->objects){
+        unsigned i;
+        for(i=0; i<tracklets.size(); ++i ){
+           if(is_tracklet_detected[i])
+              continue;
+
+           auto tracklet = tracklets[i];
+
+           double d = Get2DDistanceBetweenObjects(obj, tracklet);
+           if(d > 2){ // skip this obj
+               continue;
+           }
+
+            double iou = Get2DIoUOfObjects(obj, tracklet);
+            if(iou > overlap_threshold_){
                 obj.color = matched_color_;
                 out_matched_objects.objects.push_back(obj);
-                is_tracklet_detected[i] = matched = true;
+                is_tracklet_detected[i] = true;
+
+                if(tracklet.label == "Car"){
+                  ++detected_cars_in_this_frame;
+                  double n = std::sqrt(std::pow(obj.pose.position.x,2)
+                    +std::pow(obj.pose.position.y,2));
+                  distance_histogram_of_detected_[(int)n/(100/arr_size)]++;
+                  iou_histogram_of_detected_[int(100*iou)/(100/arr_size)]++;
+                }
+
                 break;
             }
 
-            //            double d = Get2DDistanceBetweenObjects(obj, tracklet);
-            //            if(d <= 2){ // Distance is smaller than 2 meters, let's check
-            //                out_matched_objects.objects.push_back(obj);
-            //                missed  = false;
-            //                break;
-            //            }
         }
 
-        if(!matched){
+        if(!is_tracklet_detected[i]){
             obj.color = mispredicted_color_;
             out_mispredicted_objects.objects.push_back(obj);
         }
@@ -112,89 +122,198 @@ ROSLidarTrackletCompareApp::MatchDetectionsAndTracklets(
 
     // If there are tracklets that were not matched with anything,
     // they are missed
+    unsigned total_cars_in_this_frame=0;
     for(auto i=0; i < is_tracklet_detected.size(); ++i ){
+        if(tracklets[i].label == "Car"){
+          ++total_cars_in_this_frame;
+        }
+
         if(!is_tracklet_detected[i]){
             auto obj = tracklets[i];
             obj.color = missed_color_;
             out_missed_objects.objects.push_back(obj);
+            double n = std::sqrt(std::pow(obj.pose.position.x,2)
+              +std::pow(obj.pose.position.y,2));
+            distance_histogram_of_missed_[(int)n/(100/arr_size)]++;
         }
+
     }
 
+    detected_car_stats_per_frame_.emplace_back(
+      detected_cars_in_this_frame, total_cars_in_this_frame);
+
+    std::cout << "IoU histogram (%0 to %99):\n";
+    for(auto i=0; i<arr_size ; ++i)
+      std::cout << std::setw(3) << i*(100/arr_size);
+    std::cout << std::endl;
+    for(auto i=0; i<arr_size ; ++i)
+      std::cout << std::setw(3) << iou_histogram_of_detected_[i];
+    std::cout << std::endl;
+
+    std::cout << "Detected object distance histogram (meters):\n";
+    for(auto i=0; i<arr_size ; ++i)
+      std::cout << std::setw(3) << i*(100/arr_size);
+    std::cout << std::endl;
+    for(auto i=0; i<arr_size ; ++i)
+      std::cout << std::setw(3) << distance_histogram_of_detected_[i];
+    std::cout << std::endl;
+
+    std::cout << "Missed object distance histogram (meters):\n";
+    for(auto i=0; i<arr_size ; ++i)
+      std::cout << std::setw(3) << i*(100/arr_size);
+    std::cout << std::endl;
+    for(auto i=0; i<arr_size ; ++i)
+      std::cout << std::setw(3) << distance_histogram_of_missed_[i];
+    std::cout << std::endl;
+
+    std::cout << "Total detected car \n";
+
+
+    std::cout << "Detected car stats:\n";
+    // for(auto i=0; i<detected_car_stats_per_frame_.size() ; ++i)
+      // std::cout << std::setw(3) << i;
+    // std::cout << std::endl;
+    auto t=0;
+    for(auto i=0; i<detected_car_stats_per_frame_.size() ; ++i){
+      // std::cout << std::setw(3) << detected_car_stats_per_frame_[i].second;
+      t += detected_car_stats_per_frame_[i].second;
+    }
+    std::cout << std::endl;
+    auto td=0;
+    for(auto i=0; i<detected_car_stats_per_frame_.size() ; ++i){
+      // std::cout << std::setw(3) << detected_car_stats_per_frame_[i].first;
+      td += detected_car_stats_per_frame_[i].first;
+    }
+    std::cout << "Total detected:" << td << "/" << t;
+    std::cout << std::endl;
 }
 
 double ROSLidarTrackletCompareApp::Get2DIoUOfObjects(
         const autoware_msgs::DetectedObject &in_object1,
         const autoware_msgs::DetectedObject &in_object2)
 {
+    // the points are sorted as:
+    // 1 1, -1 1, -1 -1, 1 -1
     auto obj1_vertices = getVerticesOf3DObject(in_object1);
     // Just XY dimension is enough, remove half of the points in Z
     obj1_vertices.erase(obj1_vertices.begin(), obj1_vertices.begin()+4);
+    for(auto &v : obj1_vertices) v[2] = 0;
     auto obj2_vertices = getVerticesOf3DObject(in_object2);
     // Just XY dimension is enough, remove half of the points in Z
     obj2_vertices.erase(obj2_vertices.begin(), obj2_vertices.begin()+4);
+    for(auto &v : obj2_vertices) v[2] = 0;
 
-    auto sum_of_areas = polygonArea(obj1_vertices) + polygonArea(obj2_vertices);
+    jsk_recognition_utils::Vertices intersect_points;
 
-    // calculate the points in each others area
-    std::array<float,4> obj1_limits, obj2_limits;
-
-    // maybe these can be done faster! because the points are sorted as:
-    // 1 1, -1 1, -1 -1, 1 -1
-    getXYLimitsOfVertices(obj1_vertices, obj1_limits);
-    getXYLimitsOfVertices(obj2_vertices, obj2_limits);
-
-    //populate points
-    const auto neighboorPointsDistance = 0.01; //meters
-    populateVertices(obj1_vertices, neighboorPointsDistance);
-    populateVertices(obj2_vertices, neighboorPointsDistance);
-
-    jsk_recognition_utils::Vertices intersect_points1, intersect_points2;
-    for(auto& v : obj1_vertices){
-        if(is2DPointInsideLimits(v, obj2_limits)){
-            intersect_points1.push_back(v);
-        }
-    }
-    for(auto &v : obj2_vertices){
-        if(is2DPointInsideLimits(v, obj1_limits)){
-            intersect_points2.push_back(v);
-        }
-    }
-
-    if(intersect_points1.size() < 2 || intersect_points2.size() < 2)
-        return 0; // not enough intersection!
-
-    // I HAVE TO MAKE SURE THAT POINTS ARE ORDERED CLOCKWISE OR COUNTER CLOCKWISE
-    auto d1 = (intersect_points1.back() - intersect_points2[0]).squaredNorm();
-    auto d2 = (intersect_points1.back() - intersect_points2.back()).squaredNorm();
-
-    if(d1 < d2){
-        auto it = intersect_points2.cbegin();
-        auto end_it = intersect_points2.cend();
-        while(it != end_it)
-            intersect_points1.push_back(*(it++));
-    }
-    else{
-        auto it = intersect_points2.crbegin();
-        auto end_it = intersect_points2.crend();
-        while(it != end_it)
-            intersect_points1.push_back(*(it++));
-    }
-
-    // debug
-    std::cout << "Intersection points:\n";
-    for(auto& v : intersect_points1)
-        std::cout << v << std::endl;
+    GetIntersectionPoints(intersect_points, obj1_vertices, obj2_vertices);
+    if(intersect_points.size() < 4) return 0;
 
     // calculate area and IoU
-    auto intersect_area = polygonArea(intersect_points1);
+    auto intersect_area = polygonArea(intersect_points);
 
-    return intersect_area / (sum_of_areas - intersect_area);
+    auto rect1_area = polygonArea(obj1_vertices);
+    auto rect2_area = polygonArea(obj2_vertices);
+    auto sum_of_obj_areas = rect1_area + rect2_area;
+
+    auto iou =  intersect_area / (sum_of_obj_areas - intersect_area);
+
+    std::cout << "obj1 position:" << in_object1.pose.position;
+    std::cout << "obj2 position:" << in_object2.pose.position;
+    std::cout << "distance between objects:"
+              << Get2DDistanceBetweenObjects(in_object1, in_object2)
+              << "m\n";
+    std::cout << "IoU: " << iou << std::endl << std::endl;
+
+    return iou;
+}
+
+void ROSLidarTrackletCompareApp::GetIntersectionPoints(
+  jsk_recognition_utils::Vertices &out_intersect_points,
+  const jsk_recognition_utils::Vertices &rect1_v,
+  const jsk_recognition_utils::Vertices &rect2_v)
+{
+  std::list<jsk_recognition_utils::Vertices> ip_v_l;
+
+  GetEncapsulatedPoints(ip_v_l, rect1_v, rect2_v);
+  auto sz = ip_v_l.size();
+  if(sz == 0) return;
+
+  GetEncapsulatedPoints(ip_v_l, rect2_v, rect1_v);
+  if(ip_v_l.size() == sz) return;
+
+  out_intersect_points.insert(out_intersect_points.end(),
+    ip_v_l.front().cbegin(), ip_v_l.front().cend());
+  ip_v_l.pop_front();
+
+  while(!ip_v_l.empty()){
+    auto &v = out_intersect_points.back();
+    double d = DBL_MAX, d_temp;
+    std::list<jsk_recognition_utils::Vertices>::iterator target;
+    bool reverse;
+    for(auto it=ip_v_l.begin(); it != ip_v_l.end() ; ++it){
+      d_temp = (v-it->front()).squaredNorm();
+      if(d_temp < d){
+        target=it; reverse=false; d = d_temp;
+      }
+      d_temp = (v-it->back()).squaredNorm();
+      if(d_temp < d){
+        target=it; reverse=true; d = d_temp;
+      }
+    }
+
+    if(reverse){
+      out_intersect_points.insert(out_intersect_points.end(),
+        target->crbegin(), target->crend());
+    }
+    else{
+      out_intersect_points.insert(out_intersect_points.end(),
+        target->cbegin(), target->cend());
+    }
+
+    ip_v_l.erase(target);
+  }
+
+}
+
+void ROSLidarTrackletCompareApp::GetEncapsulatedPoints(
+  std::list<jsk_recognition_utils::Vertices> &out_encapsulated_rect2_v_l,
+  const jsk_recognition_utils::Vertices &rect1_v,
+  const jsk_recognition_utils::Vertices &rect2_v,
+  const double rect1_area)
+{
+  double r_area = (rect1_area == 0) ? polygonArea(rect1_v) : rect1_area;
+
+  //populate points
+  jsk_recognition_utils::Vertices populated_rect2_v;
+  const auto neighboorPointsDistance = 0.1; //meters
+  populateVertices(rect2_v, neighboorPointsDistance, populated_rect2_v);
+
+  for(auto i =0 ; i < populated_rect2_v.size() ; ++i){
+    out_encapsulated_rect2_v_l.emplace_back();
+    auto &vertices = out_encapsulated_rect2_v_l.back();
+
+    while(is2DPointInsideRectangle(populated_rect2_v[i], rect1_v, r_area)
+        &&  i < populated_rect2_v.size())
+    {
+        vertices.push_back(populated_rect2_v[i]);
+        ++i;
+    }
+
+    while(!is2DPointInsideRectangle(populated_rect2_v[i], rect1_v, r_area)
+        && i < populated_rect2_v.size())
+    {
+        ++i;
+    }
+
+    if(vertices.empty())
+      out_encapsulated_rect2_v_l.pop_back();
+  }
 }
 
 // Shoelace formula
 // thank you geeksforgeeks!
 double ROSLidarTrackletCompareApp::polygonArea(
-        jsk_recognition_utils::Vertices &vertices)
+        const jsk_recognition_utils::Vertices &vertices)
 {
     // Initialze area
     double area = 0.0;
@@ -213,55 +332,65 @@ double ROSLidarTrackletCompareApp::polygonArea(
 }
 
 void ROSLidarTrackletCompareApp::populateVertices(
-        jsk_recognition_utils::Vertices &vertices,
-        float distBetweenNeighboorPointsInMeters)
+        const jsk_recognition_utils::Vertices &vertices,
+        const float distBetweenNeighboorPointsInMeters,
+        jsk_recognition_utils::Vertices &out_populated_vertices)
 {
-    jsk_recognition_utils::Vertices new_vertices;
+    out_populated_vertices.clear();
 
-    vertices.push_back(vertices[0]);
-    for(auto i=0; i<vertices.size()-1; ++i){
-        float x_diff = vertices[i+1][0] - vertices[i][0];
-        float y_diff = vertices[i+1][1] - vertices[i][1];
+    auto vrts(vertices);
+    vrts.push_back(vrts[0]);
+    for(auto i=0; i<vrts.size()-1; ++i){
+        float x_diff = vrts[i+1][0] - vrts[i][0];
+        float y_diff = vrts[i+1][1] - vrts[i][1];
+	      auto d = std::sqrt(std::pow(x_diff,2) + std::pow(y_diff,2));
         unsigned pointsToPopulate =
-                std::floor(std::sqrt(std::pow(x_diff,2) + std::pow(y_diff,2))
-                           / distBetweenNeighboorPointsInMeters) + 1;
+                std::floor(d) / distBetweenNeighboorPointsInMeters + 1;
 
         float x_step = x_diff / pointsToPopulate;
         float y_step = y_diff / pointsToPopulate;
-        auto& v = vertices[i];
+        auto step = std::sqrt(std::pow(x_step,2) + std::pow(y_step,2));
+
+        auto& v = vrts[i];
 
         for(auto j = 0; j < pointsToPopulate ; ++j)
-            new_vertices.push_back(jsk_recognition_utils::Point(
-                                       v[0]+x_step*j,
-                                   v[1]+y_step*j,
-                    v[2]));
+            out_populated_vertices.push_back(jsk_recognition_utils::Point(
+                                                 v[0]+x_step*j,
+                                                 v[1]+y_step*j, v[2]));
+
+
     }
-    vertices = new_vertices;
+
 }
 
-//out: min x min y max x max y
-void ROSLidarTrackletCompareApp::getXYLimitsOfVertices(
+// https://math.stackexchange.com/questions/190111/how-to-check-if-a-point-is-inside-a-rectangle
+inline bool ROSLidarTrackletCompareApp::is2DPointInsideRectangle(
+        const jsk_recognition_utils::Point &p,
         const jsk_recognition_utils::Vertices &vertices,
-        std::array<float,4> &out_limits)
+        const double rect_area)
 {
-    out_limits[0]=FLT_MAX, out_limits[1]=FLT_MAX;
-    out_limits[2]=FLT_MIN, out_limits[3]=FLT_MIN;
+    double r_area = (rect_area == 0) ? polygonArea(vertices) : rect_area;
 
-    for(auto &v : vertices){
-        out_limits[0] = std::min(out_limits[0],v(0));
-        out_limits[1] = std::min(out_limits[1],v(1));
-        out_limits[2] = std::max(out_limits[2],v(0));
-        out_limits[3] = std::max(out_limits[3],v(1));
-    }
-}
+    jsk_recognition_utils::Vertices triangle;
+    triangle.push_back(p);
+    triangle.push_back(vertices[0]);
+    triangle.push_back(vertices[1]);
+    auto area = polygonArea(triangle);
+    triangle[1] = vertices[1];
+    triangle[2] = vertices[2];
+    area += polygonArea(triangle);
+    triangle[1] = vertices[2];
+    triangle[2] = vertices[3];
+    area += polygonArea(triangle);
+    triangle[1] = vertices[3];
+    triangle[2] = vertices[0];
+    area += polygonArea(triangle);
 
-inline bool ROSLidarTrackletCompareApp::is2DPointInsideLimits(
-        const jsk_recognition_utils::Point &p, const std::array<float,4> &in_limits)
-{
-    if(p(0) > in_limits[0] && p(1) > in_limits[1]
-            && p(0) < in_limits[2] && p(1) < in_limits[3])
-        return true;
-    return false;
+    const double epsilon = 0.0001;
+
+    auto sub = area - r_area;
+    bool b = sub < epsilon;
+    return b;
 }
 
 jsk_recognition_utils::Vertices ROSLidarTrackletCompareApp::getVerticesOf3DObject(
@@ -415,14 +544,13 @@ ROSLidarTrackletCompareApp::Run()
 
 ROSLidarTrackletCompareApp::ROSLidarTrackletCompareApp()
 {
-    overlap_threshold_ = 0.5;
-    // green (Salem)
-    matched_color_ .r = 30; matched_color_ .g = 130;
-    matched_color_ .b = 76; matched_color_ .a = 1;
-    // red (Monza)
-    missed_color_ .r = 207; missed_color_ .g = 0;
-    missed_color_ .b = 15; missed_color_ .a = 1;
-    // purple (Seance)
-    mispredicted_color_ .r = 154; mispredicted_color_ .g = 18;
-    mispredicted_color_ .b = 179; mispredicted_color_ .a = 1;
+    // green
+    matched_color_ .r = 0; matched_color_ .g = 255;
+    matched_color_ .b = 0; matched_color_ .a = 1;
+    // red
+    missed_color_ .r = 255; missed_color_ .g = 0;
+    missed_color_ .b = 0;   missed_color_ .a = 1;
+    // blue
+    mispredicted_color_ .r = 0;   mispredicted_color_ .g = 0;
+    mispredicted_color_ .b = 255; mispredicted_color_ .a = 1;
 }
