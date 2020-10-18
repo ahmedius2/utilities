@@ -1,0 +1,7 @@
+<launch>
+
+  <node name="sched_server" pkg="sched_server" type="sched_server" output="screen">
+    <param name="sched_conf_path" value="/media/ahmet/UBUNTU18_0/my_data/kitti_dataset/launch_files/sched_conf.csv" />
+  </node>
+
+</launch>

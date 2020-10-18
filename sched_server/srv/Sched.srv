@@ -1,0 +1,8 @@
+string node_name
+---
+bool execute
+uint8 policy
+int32 priority
+bool set_affinity
+int64 cpu_affinity_mask
+int64 rt_gang_id
