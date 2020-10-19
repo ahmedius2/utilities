@@ -19,7 +19,7 @@ bool ConfigureSchedOfCallingThread(){
     sched_server::Sched sched_srv_msg;
 
     sched_srv_msg.request.node_name = ros::this_node::getName() ;
-    ros::service::waitForService("sched_service", -1);
+    ros::service::waitForService("sched_service", 3); // 3 seconds timout
     if (!ros::service::call("sched_service", sched_srv_msg))
     {
         std::cerr << "Coudln't get response from server for node "
