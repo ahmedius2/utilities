@@ -6,6 +6,7 @@
 #include <fstream>
 
 #include <ros/ros.h>
+#include <ros/callback_queue.h>
 
 #include "time_profiling_spinner/time_profiling_spinner.h"
 
@@ -23,6 +24,7 @@ TimeProfilingSpinner::TimeProfilingSpinner(
     m_time_start_buf_ = new long[bufSize_];
     m_time_end_buf_ = new long[bufSize_];
     t_cpu_time_diff_buf_ = new long[bufSize_];
+    callback_called_buf_ = new char[bufSize_];
     flipped_=false;
     file_saved_=false;
     TimeProfilingSpinner::lastCreatedObject_ = this;
@@ -33,11 +35,12 @@ void TimeProfilingSpinner::measureStartTime(){
     get_thread_cputime(cpu_time1_);
 }
 
-void TimeProfilingSpinner::measureAndSaveEndTime(){
+void TimeProfilingSpinner::measureAndSaveEndTime(int num_callbacks_called){
     get_monotonic_time(m_time_end_buf_[bufIndex_]);
     long cpu_time2_;
     get_thread_cputime(cpu_time2_);
     t_cpu_time_diff_buf_[bufIndex_] = cpu_time2_ - cpu_time1_;
+    callback_called_buf_[bufIndex_] = num_callbacks_called;
 
     // reset buf index if node continues to live
     if(++bufIndex_ >= bufSize_){
@@ -49,11 +52,22 @@ void TimeProfilingSpinner::measureAndSaveEndTime(){
 void TimeProfilingSpinner::spinAndProfileUntilShutdown(){
     ros::Rate r = ros::Rate(callbackCheckFrequency_);
     ROS_INFO("Starting to spin.");
+    ros::CallbackQueue* cq = ros::getGlobalCallbackQueue();
     while (ros::ok())
     {
         measureStartTime();
-        ros::spinOnce();
-        measureAndSaveEndTime();
+        int num_called_callbacks=0;
+        ros::CallbackQueue::CallOneResult cor;
+        while(!cq->empty()){
+            cor = cq->callOne();
+            if(cor == ros::CallbackQueue::CallOneResult::Called)
+                ++num_called_callbacks;
+            else if(cor == ros::CallbackQueue::CallOneResult::TryAgain)
+                ROS_INFO("Couldn't call callback, gonna try again...");
+            else
+                break; // disabled or empty
+        }
+        measureAndSaveEndTime(num_called_callbacks);
         r.sleep();
     }
     ROS_INFO("Stoppped spinning.");
@@ -70,12 +84,14 @@ void TimeProfilingSpinner::saveProfilingData(){
         for(int i=bufIndex_; i<bufSize_; ++i){
             outfile << m_time_start_buf_[i] << ","
                     << m_time_end_buf_[i] << ","
+                    << static_cast<long>(callback_called_buf_[i])  << ","
                     << t_cpu_time_diff_buf_[i] << std::endl;
         }
     }
     for(int i=0; i<bufIndex_; ++i){
         outfile << m_time_start_buf_[i] << ","
                 << m_time_end_buf_[i] << ","
+                << static_cast<long>(callback_called_buf_[i])  << ","
                 << t_cpu_time_diff_buf_[i] << std::endl;
     }
     file_saved_=true;
@@ -104,6 +120,7 @@ TimeProfilingSpinner::~TimeProfilingSpinner(){
     delete m_time_start_buf_;
     delete m_time_end_buf_;
     delete t_cpu_time_diff_buf_;
+    delete callback_called_buf_;
 }
 
 

@@ -132,7 +132,7 @@ add_dependencies(time_profiling_spinner ${${PROJECT_NAME}_EXPORTED_TARGETS} ${ca
 ## Declare a C++ executable
 ## With catkin_make all packages are built within a single CMake context
 ## The recommended prefix ensures that target names across packages don't collide
-add_executable(${PROJECT_NAME} src/sched_server_node.cpp)
+add_executable(${PROJECT_NAME} src/sched_server/sched_server_node.cpp)
 
 ## Rename C++ executable without prefix
 ## The above recommended prefix causes long target names, the following renames the

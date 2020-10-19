@@ -21,6 +21,9 @@
 
 // If the node has ros::shutdown problem, install a new singint handler at where
 /*
+#include "sched_server/time_profiling_spinner.h"
+#include <signal.h>
+
   ros::init is called: like this:
   ros::init(argc, argv, "node_name", ros::init_options::NoSigintHandler);
   signal(SIGINT, TimeProfilingSpinner::signalHandler);
@@ -46,7 +49,7 @@ public:
 
     void measureStartTime();
 
-    void measureAndSaveEndTime();
+    void measureAndSaveEndTime(int num_callbacks_called = -1);
 
     void spinAndProfileUntilShutdown();
 
@@ -64,6 +67,7 @@ private:
     long cpu_time1_;
     double callbackCheckFrequency_;
     int bufIndex_, bufSize_;
+    char *callback_called_buf_;
     long *m_time_start_buf_, *m_time_end_buf_, *t_cpu_time_diff_buf_;
     bool flipped_, file_saved_;
     static TimeProfilingSpinner* lastCreatedObject_;
