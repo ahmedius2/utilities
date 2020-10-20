@@ -4,16 +4,22 @@
 #include <sys/resource.h>
 #include <time.h>
 #include <fstream>
+#include <thread>
+#include <list>
+#include <mutex>
 
 #include <ros/ros.h>
 #include <ros/callback_queue.h>
 
 #include "time_profiling_spinner/time_profiling_spinner.h"
 
-TimeProfilingSpinner* TimeProfilingSpinner::lastCreatedObject_ = nullptr;
+std::list<TimeProfilingSpinner*> TimeProfilingSpinner::createdObjects;
+std::mutex TimeProfilingSpinner::cObjsMtx;
+std::mutex TimeProfilingSpinner::writeMtx;
 
 TimeProfilingSpinner::TimeProfilingSpinner(
-        double callbackCheckFrequency, int execLifetimeMinutes)
+        double callbackCheckFrequency, int execLifetimeMinutes,
+        std::string fname_post)
 {
     if (callbackCheckFrequency_ < 0)
         callbackCheckFrequency_=10;
@@ -27,7 +33,14 @@ TimeProfilingSpinner::TimeProfilingSpinner(
     callback_called_buf_ = new char[bufSize_];
     flipped_=false;
     file_saved_=false;
-    TimeProfilingSpinner::lastCreatedObject_ = this;
+//    if(TimeProfilingSpinner::createdObjects == nullptr){
+//        TimeProfilingSpinner::createdObjects =
+//                new std::forward_list<TimeProfilingSpinner*>();
+//    }
+    fname_post_ = fname_post;
+
+    const std::lock_guard<std::mutex> lock(TimeProfilingSpinner::cObjsMtx);
+    TimeProfilingSpinner::createdObjects.push_front(this);
 }
 
 void TimeProfilingSpinner::measureStartTime(){
@@ -75,10 +88,15 @@ void TimeProfilingSpinner::spinAndProfileUntilShutdown(){
 }
 
 void TimeProfilingSpinner::saveProfilingData(){
+    const std::lock_guard<std::mutex> lock(TimeProfilingSpinner::writeMtx);
     //Save timing info to file
+    if(file_saved_)
+        return;
+
     ROS_INFO("Starting to write profiling data to file.");
 
-    std::ofstream outfile("." + ros::this_node::getName() + "_timing.csv");
+    std::ofstream outfile("./" + ros::this_node::getName()
+                          + fname_post_ + "_timing.csv");
 
     if(flipped_){
         for(int i=bufIndex_; i<bufSize_; ++i){
@@ -96,18 +114,22 @@ void TimeProfilingSpinner::saveProfilingData(){
     }
     file_saved_=true;
     ROS_INFO("Done writing profile data.");
-
 }
 
-void TimeProfilingSpinner::saveProfilingDataOfLastCreatedObject()
+void TimeProfilingSpinner::saveProfilingDataOfAllCreatedObjects()
 {
-    TimeProfilingSpinner::lastCreatedObject_->saveProfilingData();
+    {
+        const std::lock_guard<std::mutex> lock(TimeProfilingSpinner::cObjsMtx);
+        for(auto obj : TimeProfilingSpinner::createdObjects)
+            obj->saveProfilingData();
+    }
+
 }
 
 void TimeProfilingSpinner::signalHandler(int sig)
 {
     ROS_INFO("Signal has come.");
-    TimeProfilingSpinner::lastCreatedObject_->saveProfilingData();
+    TimeProfilingSpinner::saveProfilingDataOfAllCreatedObjects();
     ros::shutdown();
 }
 

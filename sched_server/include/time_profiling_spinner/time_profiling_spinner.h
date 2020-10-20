@@ -38,6 +38,11 @@
 */
 
 
+#include<list>
+
+namespace std {
+class mutex;
+}
 
 #define DEFAULT_CALLBACK_FREQ_HZ 10
 #define DEFAULT_EXEC_TIME_MINUTES 5
@@ -45,7 +50,9 @@
 class TimeProfilingSpinner
 {
 public:
-    TimeProfilingSpinner(double callbackCheckFrequency, int execLifetimeMinutes);
+    TimeProfilingSpinner(double callbackCheckFrequency,
+                         int execLifetimeMinutes,
+                         std::string fname_post = "");
 
     void measureStartTime();
 
@@ -57,7 +64,7 @@ public:
 
     // Most likely, there will be only one object.
     // This function is added to the class due to ros::shutdown problem.
-    static void saveProfilingDataOfLastCreatedObject();
+    static void saveProfilingDataOfAllCreatedObjects();
 
     static void signalHandler(int sig);
 
@@ -70,7 +77,9 @@ private:
     char *callback_called_buf_;
     long *m_time_start_buf_, *m_time_end_buf_, *t_cpu_time_diff_buf_;
     bool flipped_, file_saved_;
-    static TimeProfilingSpinner* lastCreatedObject_;
+    std::string fname_post_;
+    static std::list<TimeProfilingSpinner*> createdObjects;
+    static std::mutex cObjsMtx, writeMtx;
 
 //    inline void get_thread_cputime(double& seconds);
     inline void get_thread_cputime(long& microseconds);
