@@ -6,6 +6,7 @@
 
 #include <string>
 #include <sstream>
+#include <cstdlib>
 #include <pthread.h>
 #include <sched.h>
 #include <sys/resource.h>
@@ -15,31 +16,41 @@
 
 namespace SchedClient
 {
-bool ConfigureSchedOfCallingThread(){
+bool ConfigureSchedOfCallingThread(std::string thread_name=""){
     sched_server::Sched sched_srv_msg;
 
-    sched_srv_msg.request.node_name = ros::this_node::getName() ;
+    sched_srv_msg.request.node_name = (thread_name.compare("") == 0) ? ros::this_node::getName() : thread_name;
     ros::service::waitForService("sched_service", 3); // 3 seconds timout
-    if (!ros::service::call("sched_service", sched_srv_msg))
+    while (!ros::service::call("sched_service", sched_srv_msg))
     {
         std::cerr << "Coudln't get response from server for node "
                   << sched_srv_msg.request.node_name << std::endl;
-        return false;
+        std::cerr << "Going to try again connecting after 1 second...\n";
+        sleep(1);
+        //return false;
     }
 
     sched_server::SchedResponse& sr = sched_srv_msg.response;
     if(!sr.execute){
+        std::cerr << "Node " << sched_srv_msg.request.node_name
+                  << " is not configured to execute, exiting...\n";
         ros::shutdown();
+        exit(0);
+        // won't reach here
         return false;
     }
 
     struct sched_param sp;
     sp.sched_priority= (sr.policy == SCHED_OTHER) ? 0 : sr.priority;
 
+#ifdef USE_PTHREAD
     auto thread_id=pthread_self();
     int ret = pthread_setschedparam(thread_id, sr.policy, &sp);
+#else
+    int ret = sched_setscheduler(0, sr.policy,&sp);
+#endif
     if(ret){
-        std::cerr << "pthread_setschedparam returned error: "
+        std::cerr << "pthread_setschedparam or sched_setscheduler returned error: "
                   << std::strerror(errno) << std::endl;
         std::cerr << "Arguments are policy:" << sr.policy
                   << " priority:" << sp.sched_priority << std::endl;
@@ -47,7 +58,7 @@ bool ConfigureSchedOfCallingThread(){
     }
 
     if(sr.policy == SCHED_OTHER){
-        ret = setpriority(PRIO_PROCESS, getpid(), sr.priority);
+        ret = setpriority(PRIO_PROCESS, 0, sr.priority);
         if(ret == -1){
             std::cerr << "setpriority returned error: "
                       << std::strerror(errno) << std::endl;
@@ -63,13 +74,21 @@ bool ConfigureSchedOfCallingThread(){
         for(unsigned i=0; mask != 0; ++i, mask = mask>>1)
             if(mask & 0x1)
                 CPU_SET(i,&cpuset);
+#ifdef USE_PTHREAD
         ret = pthread_setaffinity_np(thread_id,sizeof(cpuset),&cpuset);
+#else
+        ret = sched_setaffinity(0,sizeof(cpuset),&cpuset);
+#endif
         if(ret){
-            std::cerr << "pthread_setaffinity_np returned error: "
+            std::cerr << "pthread_setaffinity_np or sched_setaffinity returned error: "
                       << std::strerror(errno) << std::endl;
             return false;
         }
     }
+
+    ROS_INFO("Node %s is configured and ready to execute", sched_srv_msg.request.node_name.c_str());
+    std::cerr << "Node " << sched_srv_msg.request.node_name 
+	      << " is configured and ready to execute with conf:" << sr;
     return true;
 }
 }

@@ -44,6 +44,10 @@ namespace std {
 class mutex;
 }
 
+namespace ros {
+class CallbackQueue;
+}
+
 #define DEFAULT_CALLBACK_FREQ_HZ 10
 #define DEFAULT_EXEC_TIME_MINUTES 5
 
@@ -60,6 +64,8 @@ public:
 
     void spinAndProfileUntilShutdown();
 
+    int callAvailableCallbacks(ros::CallbackQueue *cqueue);
+
     void saveProfilingData();
 
     // Most likely, there will be only one object.
@@ -74,7 +80,7 @@ private:
     long cpu_time1_;
     double callbackCheckFrequency_;
     int bufIndex_, bufSize_;
-    char *callback_called_buf_;
+    char *callback_called_buf_, *start_cpuid_buf_, *end_cpuid_buf_;
     long *m_time_start_buf_, *m_time_end_buf_, *t_cpu_time_diff_buf_;
     bool flipped_, file_saved_;
     std::string fname_post_;

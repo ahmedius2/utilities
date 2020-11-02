@@ -5,6 +5,7 @@
 #include <time.h>
 #include <fstream>
 #include <thread>
+#include <chrono>
 #include <list>
 #include <mutex>
 
@@ -21,16 +22,18 @@ TimeProfilingSpinner::TimeProfilingSpinner(
         double callbackCheckFrequency, int execLifetimeMinutes,
         std::string fname_post)
 {
-    if (callbackCheckFrequency_ < 0)
+    if (callbackCheckFrequency < 0)
         callbackCheckFrequency_=10;
     else
         callbackCheckFrequency_ = callbackCheckFrequency;
     bufIndex_=0;
-    bufSize_=callbackCheckFrequency_ * 60 * execLifetimeMinutes;
+    bufSize_= 1024;//callbackCheckFrequency_ * 60 * execLifetimeMinutes;
     m_time_start_buf_ = new long[bufSize_];
     m_time_end_buf_ = new long[bufSize_];
     t_cpu_time_diff_buf_ = new long[bufSize_];
     callback_called_buf_ = new char[bufSize_];
+    start_cpuid_buf_ = new char[bufSize_];
+    end_cpuid_buf_ = new char[bufSize_];
     flipped_=false;
     file_saved_=false;
 //    if(TimeProfilingSpinner::createdObjects == nullptr){
@@ -46,6 +49,7 @@ TimeProfilingSpinner::TimeProfilingSpinner(
 void TimeProfilingSpinner::measureStartTime(){
     get_monotonic_time(m_time_start_buf_[bufIndex_]);
     get_thread_cputime(cpu_time1_);
+    start_cpuid_buf_[bufIndex_] = (char)sched_getcpu();
 }
 
 void TimeProfilingSpinner::measureAndSaveEndTime(int num_callbacks_called){
@@ -54,6 +58,7 @@ void TimeProfilingSpinner::measureAndSaveEndTime(int num_callbacks_called){
     get_thread_cputime(cpu_time2_);
     t_cpu_time_diff_buf_[bufIndex_] = cpu_time2_ - cpu_time1_;
     callback_called_buf_[bufIndex_] = num_callbacks_called;
+    end_cpuid_buf_[bufIndex_] = (char)sched_getcpu();
 
     // reset buf index if node continues to live
     if(++bufIndex_ >= bufSize_){
@@ -63,35 +68,64 @@ void TimeProfilingSpinner::measureAndSaveEndTime(int num_callbacks_called){
 }
 
 void TimeProfilingSpinner::spinAndProfileUntilShutdown(){
-    ros::Rate r = ros::Rate(callbackCheckFrequency_);
     ROS_INFO("Starting to spin.");
-    ros::CallbackQueue* cq = ros::getGlobalCallbackQueue();
-    while (ros::ok())
+
+    static ros::CallbackQueue* cq = ros::getGlobalCallbackQueue();
+    auto period = std::chrono::milliseconds(
+		    static_cast<int>(1000/callbackCheckFrequency_));
+    auto now = std::chrono::steady_clock::now();
+    auto target = now + period;
+    while(ros::ok())
     {
         measureStartTime();
-        int num_called_callbacks=0;
-        ros::CallbackQueue::CallOneResult cor;
-        while(!cq->empty()){
-            cor = cq->callOne();
-            if(cor == ros::CallbackQueue::CallOneResult::Called)
-                ++num_called_callbacks;
-            else if(cor == ros::CallbackQueue::CallOneResult::TryAgain)
-                ROS_INFO("Couldn't call callback, gonna try again...");
-            else
-                break; // disabled or empty
-        }
-        measureAndSaveEndTime(num_called_callbacks);
-        r.sleep();
+        int cb_executed= callAvailableCallbacks(cq);
+        measureAndSaveEndTime(cb_executed);
+
+        // We don't want this part to cut execution of others
+        // when we are using rtg-sync
+        std::this_thread::sleep_until(target);
+        target += period;
     }
     ROS_INFO("Stoppped spinning.");
 
 }
+
+int TimeProfilingSpinner::callAvailableCallbacks(ros::CallbackQueue *cqueue)
+{
+//    ros::CallbackQueue::CallOneResult cor;
+
+    auto cb_executed=static_cast<int>(!cqueue->empty());
+    //cqueue->enable();
+    cqueue->callAvailable();
+    //cqueue->disable();
+//        cq->clear();
+//        while(!cq->empty()){
+//            cor = cq->callOne();
+//            if(cor == ros::CallbackQueue::CallOneResult::Called){
+//                ++cb_executed;
+//            }
+//            else if(cor == ros::CallbackQueue::CallOneResult::TryAgain){
+//                ROS_INFO("Couldn't call callback, gonna try again...");
+//            }
+//            else{
+//                break; // disabled or empty
+//            }
+//        }
+
+    return cb_executed;
+}
+
 
 void TimeProfilingSpinner::saveProfilingData(){
     const std::lock_guard<std::mutex> lock(TimeProfilingSpinner::writeMtx);
     //Save timing info to file
     if(file_saved_)
         return;
+
+    if(bufIndex_==0 && !flipped_){
+        ROS_INFO("Not writing profile data since it is empty.");
+        return;
+    }
 
     ROS_INFO("Starting to write profiling data to file.");
 
@@ -102,15 +136,19 @@ void TimeProfilingSpinner::saveProfilingData(){
         for(int i=bufIndex_; i<bufSize_; ++i){
             outfile << m_time_start_buf_[i] << ","
                     << m_time_end_buf_[i] << ","
-                    << static_cast<long>(callback_called_buf_[i])  << ","
-                    << t_cpu_time_diff_buf_[i] << std::endl;
+                    << t_cpu_time_diff_buf_[i] << ","
+                    << static_cast<long>(callback_called_buf_[i]) <<","
+                    << static_cast<long>(start_cpuid_buf_[i]) <<","
+                    << static_cast<long>(end_cpuid_buf_[i]) << std::endl;
         }
     }
     for(int i=0; i<bufIndex_; ++i){
         outfile << m_time_start_buf_[i] << ","
                 << m_time_end_buf_[i] << ","
-                << static_cast<long>(callback_called_buf_[i])  << ","
-                << t_cpu_time_diff_buf_[i] << std::endl;
+                << t_cpu_time_diff_buf_[i] << ","
+                << static_cast<long>(callback_called_buf_[i]) <<","
+                << static_cast<long>(start_cpuid_buf_[i]) <<","
+                << static_cast<long>(end_cpuid_buf_[i]) << std::endl;
     }
     file_saved_=true;
     ROS_INFO("Done writing profile data.");
@@ -143,6 +181,8 @@ TimeProfilingSpinner::~TimeProfilingSpinner(){
     delete m_time_end_buf_;
     delete t_cpu_time_diff_buf_;
     delete callback_called_buf_;
+    delete start_cpuid_buf_;
+    delete end_cpuid_buf_;
 }
 
 
