@@ -31,14 +31,18 @@
 // After that, replace ros::spin() with this code snippet:
 /*
   SchedClient::ConfigureSchedOfCallingThread();
-  TimeProfilingSpinner spinner(DEFAULT_CALLBACK_FREQ_HZ,
-  DEFAULT_EXEC_TIME_MINUTES);
+  TimeProfilingSpinner spinner(DEFAULT_CALLBACK_FREQ_HZ,false, func);
   spinner.spinAndProfileUntilShutdown();
   spinner.saveProfilingData();
 */
 
 
-#include<list>
+#include <list>
+#include <chrono>
+#include <functional>
+#include <atomic>
+#include <condition_variable>
+#include <semaphore.h>
 
 namespace std {
 class mutex;
@@ -48,25 +52,33 @@ namespace ros {
 class CallbackQueue;
 }
 
-#define DEFAULT_CALLBACK_FREQ_HZ 10
-#define DEFAULT_EXEC_TIME_MINUTES 5
+#define USE_DEFAULT_CALLBACK_FREQ -1
+#define DEFAULT_CALLBACK_FREQ_HZ 5
+#define DEFAULT_EXEC_TIME_MINUTES 2
 
 class TimeProfilingSpinner
 {
 public:
     TimeProfilingSpinner(double callbackCheckFrequency,
-                         int execLifetimeMinutes,
-                         std::string fname_post = "");
+        bool useCompanionThread,
+        std::function<void()> funcToCall = std::function<void()>(),
+        std::string fname_post = "");
 
     void measureStartTime();
 
     void measureAndSaveEndTime(int num_callbacks_called = -1);
 
+    std::chrono::system_clock::time_point getInitTargetTime();
+
     void spinAndProfileUntilShutdown();
 
-    int callAvailableCallbacks(ros::CallbackQueue *cqueue);
+    void startCompanionThread();
+
+    void startCbCheckerThread(ros::CallbackQueue* cq);
 
     void saveProfilingData();
+
+    void joinThreads();
 
     // Most likely, there will be only one object.
     // This function is added to the class due to ros::shutdown problem.
@@ -74,9 +86,14 @@ public:
 
     static void signalHandler(int sig);
 
+    static void* companionSpinner(void *ignored);
+
+    static void* cbChecker(void *cb_queue);
+
     ~TimeProfilingSpinner();
 
 private:
+    std::function<void()> funcToCall_;
     long cpu_time1_;
     double callbackCheckFrequency_;
     int bufIndex_, bufSize_;
@@ -86,6 +103,14 @@ private:
     std::string fname_post_;
     static std::list<TimeProfilingSpinner*> createdObjects;
     static std::mutex cObjsMtx, writeMtx;
+
+    pthread_t comp_thr, cb_chk_thr;
+    static sem_t cb_checker_sem, cb_ready_sem;
+    static std::mutex wakeup_mtx;
+    static std::condition_variable wakeup_cv;
+    static std::atomic_flag flag;
+    static volatile bool compThrReady;
+    bool useCompanionThread_;
 
 //    inline void get_thread_cputime(double& seconds);
     inline void get_thread_cputime(long& microseconds);

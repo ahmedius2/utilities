@@ -103,7 +103,7 @@ generate_messages(
 ## DEPENDS: system dependencies of this project that dependent projects also need
 catkin_package(
   INCLUDE_DIRS include
-  LIBRARIES time_profiling_spinner
+  LIBRARIES time_profiling_spinner rtg_sync_framework
 #  CATKIN_DEPENDS other_catkin_pkg
 #  DEPENDS system_lib
 )
@@ -122,6 +122,10 @@ include_directories(
 ## Declare a C++ library
 add_library(time_profiling_spinner #${PROJECT_NAME}
   src/time_profiling_spinner/time_profiling_spinner.cpp
+)
+
+add_library(rtg_sync_framework #${PROJECT_NAME}
+  src/rtg_sync_framework/rtg_lib.c
 )
 
 ## Add cmake target dependencies of the library
@@ -146,6 +150,10 @@ add_dependencies(${PROJECT_NAME} ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EX
 
 ## Specify libraries to link a library or executable target against
 target_link_libraries(time_profiling_spinner
+  ${catkin_LIBRARIES} pthread rt
+)
+
+target_link_libraries(rtg_sync_framework
   ${catkin_LIBRARIES}
 )
 
@@ -175,7 +183,7 @@ install(TARGETS ${PROJECT_NAME}
 
 ## Mark libraries for installation
 ## See http://docs.ros.org/melodic/api/catkin/html/howto/format1/building_libraries.html
-install(TARGETS time_profiling_spinner
+install(TARGETS time_profiling_spinner rtg_sync_framework
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
@@ -189,6 +197,12 @@ install(DIRECTORY include/${PROJECT_NAME}/
 )
 
 install(DIRECTORY include/time_profiling_spinner/
+  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
+  FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
+  PATTERN ".svn" EXCLUDE
+)
+
+install(DIRECTORY include/rtg_sync_framework/
   DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
   FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
   PATTERN ".svn" EXCLUDE
