@@ -13,7 +13,7 @@
 #include <time.h>
 #include <ros/ros.h>
 #include "sched_server/Sched.h"
-#include "sched_server/rtg_lib.h"
+#include "rtg_sync_framework/rtg_lib.h"
 
 namespace SchedClient
 {
@@ -90,8 +90,9 @@ bool ConfigureSchedOfCallingThread(std::string thread_name=""){
     if(sr.rt_gang_id > 0){
     	int ret = sched_getscheduler(0);
     	ROS_INFO("Node %s is being configured to use rt gang id: %ld with sched policy %d", sched_srv_msg.request.node_name.c_str(), sr.rt_gang_id, ret);
-        pthread_barrier_t* barrier = rtg_member_setup(sr.rt_gang_id, 0, 0);
-        rtg_member_sync(barrier);
+        rtg_member_setup(sr.rt_gang_id, 0, 0);
+        //pthread_barrier_t* barrier = rtg_member_setup(sr.rt_gang_id, 0, 0);
+        //rtg_member_sync(barrier); // no need for that
     }
 
     ROS_INFO("Node %s is configured and ready to execute", sched_srv_msg.request.node_name.c_str());

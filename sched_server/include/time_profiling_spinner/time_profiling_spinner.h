@@ -7,7 +7,7 @@
 // How to config schedule of a node:
 // add: 
 /*
-#include "sched_server/sched_client.hpp"
+//#include "sched_server/sched_client.hpp"
 #include "sched_server/time_profiling_spinner.h"
 */
 
@@ -30,7 +30,7 @@
 */
 // After that, replace ros::spin() with this code snippet:
 /*
-  SchedClient::ConfigureSchedOfCallingThread();
+  //SchedClient::ConfigureSchedOfCallingThread();
   TimeProfilingSpinner spinner(DEFAULT_CALLBACK_FREQ_HZ,false, func);
   spinner.spinAndProfileUntilShutdown();
   spinner.saveProfilingData();
@@ -52,15 +52,21 @@ namespace ros {
 class CallbackQueue;
 }
 
-#define USE_DEFAULT_CALLBACK_FREQ -1
-#define DEFAULT_CALLBACK_FREQ_HZ 5
-#define DEFAULT_EXEC_TIME_MINUTES 2
+#define USE_DEFAULT_CALLBACK_FREQ 0
+//#define DEFAULT_EXEC_TIME_MINUTES 2
 
 class TimeProfilingSpinner
 {
 public:
-    TimeProfilingSpinner(double callbackCheckFrequency,
-        bool useCompanionThread,
+    enum class OperationMode {
+        CHAIN_HEAD, // periodic if synchronized start else arrival otherwise
+        RUN_CB_ON_ARRIVAL,
+        PERIODIC
+    };
+
+    TimeProfilingSpinner(OperationMode op_mode,
+        double callbackCheckFrequency = USE_DEFAULT_CALLBACK_FREQ,
+        bool useCompanionThread = false,
         std::function<void()> funcToCall = std::function<void()>(),
         std::string fname_post = "");
 
@@ -74,8 +80,6 @@ public:
 
     void startCompanionThread();
 
-    void startCbCheckerThread(ros::CallbackQueue* cq);
-
     void saveProfilingData();
 
     void joinThreads();
@@ -88,11 +92,10 @@ public:
 
     static void* companionSpinner(void *ignored);
 
-    static void* cbChecker(void *cb_queue);
-
     ~TimeProfilingSpinner();
 
 private:
+    OperationMode op_mode_;
     std::function<void()> funcToCall_;
     long cpu_time1_;
     double callbackCheckFrequency_;
@@ -105,11 +108,12 @@ private:
     static std::mutex cObjsMtx, writeMtx;
 
     pthread_t comp_thr, cb_chk_thr;
-    static sem_t cb_checker_sem, cb_ready_sem;
-    static std::mutex wakeup_mtx;
-    static std::condition_variable wakeup_cv;
+//    static sem_t cb_checker_sem, cb_ready_sem;
+    static std::mutex wakeup_mtx, cb_mtx;
+    static std::condition_variable wakeup_cv, cb_cv;
     static std::atomic_flag flag;
     static volatile bool compThrReady;
+    bool synchronizedStart_;
     bool useCompanionThread_;
 
 //    inline void get_thread_cputime(double& seconds);

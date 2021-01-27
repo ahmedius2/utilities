@@ -1,0 +1,8 @@
+<launch>
+  <arg name="relay" default="false" />
+  <arg name="data_loopback" default="false" />
+  <node pkg="topic_barrier" name="topic_barrier" type="topic_barrier_node" output="screen">
+    <param name="relay" type="bool" value="$(arg relay)" />
+    <param name="data_loopback" type="bool" value="$(arg data_loopback)" />
+  </node>
+</launch>
