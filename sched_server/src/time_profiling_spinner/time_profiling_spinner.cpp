@@ -1,4 +1,5 @@
 #include <string>
+#include <sstream>
 #include <pthread.h>
 #include <sched.h>
 #include <sys/resource.h>
@@ -10,6 +11,8 @@
 #include <list>
 #include <mutex>
 #include <atomic>
+#include <malloc.h>
+#include <sys/mman.h>
 
 #include <ros/ros.h>
 #include <ros/callback_queue.h>
@@ -51,20 +54,16 @@ TimeProfilingSpinner::TimeProfilingSpinner(
 
     double def_cb_chk_freq;
     ret = timing_nh.getParam("default_period_hz", def_cb_chk_freq);
-    if(!ret) def_cb_chk_freq = 10.0; // couldn't get the param
+    if(!ret) def_cb_chk_freq = 10.0; // couldn't get the param, use 10 as default
 
-    if (op_mode_ == OperationMode::RUN_CB_ON_ARRIVAL) {
-        callbackCheckFrequency_=def_cb_chk_freq;
-    }
-    else{ // OperationMode::PERIODIC
-        bool udef = (callbackCheckFrequency == USE_DEFAULT_CALLBACK_FREQ);
-        callbackCheckFrequency_ = udef ? def_cb_chk_freq : callbackCheckFrequency;
-    }
+    bool udef = (callbackCheckFrequency == USE_DEFAULT_CALLBACK_FREQ);
+    callbackCheckFrequency_ = udef ? def_cb_chk_freq : callbackCheckFrequency;
 
     ROS_INFO("Using callback frequency: %f", callbackCheckFrequency_);
 
 //    useCompanionThread_=useCompanionThread;
-    useCompanionThread_=false; //For now, disable companion thread for all tasks
+    useCompanionThread_=false;
+
     funcToCall_=funcToCall;
     bufIndex_=0;
     bufSize_= 1024;//callbackCheckFrequency_ * 60 * execLifetimeMinutes;
@@ -148,104 +147,127 @@ std::chrono::system_clock::time_point TimeProfilingSpinner::getInitTargetTime()
 
 void TimeProfilingSpinner::spinAndProfileUntilShutdown(){
     ROS_INFO("Starting to initialize spinner.");
-    ros::CallbackQueue* cq = ros::getGlobalCallbackQueue();
 
     SchedClient::ConfigureSchedOfCallingThread();
+
+    int policy = sched_getscheduler(0);
+    bool privileged = (policy != SCHED_OTHER);
+    if(privileged){
+        // real-time system memory settings
+        mallopt(M_MMAP_MAX, 0);
+        mallopt(M_TRIM_THRESHOLD, -1);
+        mlockall(MCL_CURRENT | MCL_FUTURE);
+    }
+    // Only priviledged tasks can use companion thread
+//    useCompanionThread_ = useCompanionThread_ && privileged;
+
+//    sched_getparam(0, &spinner_sched_param_); // store for later use
 
     if(useCompanionThread_)
         startCompanionThread();
 
-    int calls;
+    ros::CallbackQueue* cq = ros::getGlobalCallbackQueue();
 
-    // priorities should be descending through chains
-    if(op_mode_ == OperationMode::RUN_CB_ON_ARRIVAL){
-        ros::CallbackQueue::CallOneResult cor;
-        while(ros::ok()){
-            // companion thread will partially work here
-            // because we don't know when callOne is going to
-            // run the callback.
-            if(useCompanionThread_ && !cq->empty()){
-                flag.test_and_set();
-                {
-                    std::lock_guard<std::mutex> lk(wakeup_mtx);
-                    compThrReady=true;
-                }
-                wakeup_cv.notify_one();
-                pthread_yield();
-            }
+    auto period = std::chrono::milliseconds(
+                static_cast<unsigned long>(1000.0/callbackCheckFrequency_));
 
-            measureStartTime();
-            cor = cq->callOne(ros::WallDuration(1.0/callbackCheckFrequency_));
-            if(cor == ros::CallbackQueue::CallOneResult::Called)
-                measureAndSaveEndTime(1);
-
-            if(useCompanionThread_){
-                {
-                    std::lock_guard<std::mutex> lk(wakeup_mtx);
-                    compThrReady=false;
-                }
-                flag.clear();
-                pthread_yield();
-            }
-        }
+    std::chrono::system_clock::time_point target;
+    if(synchronizedStart_){
+        target = getInitTargetTime();
+        std::this_thread::sleep_until(target);
     }
     else{
-        auto period = std::chrono::milliseconds(
-                    static_cast<unsigned long>(1000.0/callbackCheckFrequency_));
+        target = std::chrono::system_clock::now() + period;
+    }
 
-        std::chrono::system_clock::time_point target;
-        if(synchronizedStart_){
-            target = getInitTargetTime();
+    int calls;
+    // priorities should be descending through chains
+    if(op_mode_ == OperationMode::RUN_CB_ON_ARRIVAL){
+        ros::WallDuration cbWait = ros::WallDuration(1.0/callbackCheckFrequency_);
+        while(ros::ok()){
+//            bool prioDecreased=false;
+//            if(privileged && cq->empty()){
+                // Decrease is required to become lowest priority
+                // gang task, so we don't interrupt other gangs
+                // frequently while waiting for the callback to be available
+                // This continues until callback is available
+//                decreasePriority();
+//                prioDecreased=true;
+//            }
+
+            //Wait until callback becomes available
+//            auto rate = ros::Rate(200.0);
+//            while(ros::ok() && cq->empty())
+//                rate.sleep();
+
+//            if(privileged && prioDecreased){
+                // Retreive back the gang priority
+//                regainPriority();
+//            }
+
+//            if(useCompanionThread_)
+//                wakeupCompanionThread();
+
+            measureStartTime();
+            calls=callAvailableOneByOne(cq, target, cbWait);
+            if(calls > 0)
+                measureAndSaveEndTime(calls);
+
+            if(target < std::chrono::system_clock::now())
+                target += period;
+
+//            if(useCompanionThread_)
+//                suspendCompanionThread();
+
         }
-        else{
-            target = std::chrono::system_clock::now() + period;
-        }
-        std::this_thread::sleep_until(target);
+    }
+    else{ // periodic
+        bool func_available = (funcToCall_ ? true : false);
 
         while(ros::ok())
         {
-            if(useCompanionThread_){
-                flag.test_and_set();
-                {
-                    std::lock_guard<std::mutex> lk(wakeup_mtx);
-                    compThrReady=true;
-                }
-                wakeup_cv.notify_one();
-                pthread_yield();
-            }
+            if(useCompanionThread_)
+                wakeupCompanionThread();
 
-            calls=0;
-            //auto thr = std::thread([this, cq](){
             measureStartTime();
-            calls += static_cast<int>(!cq->empty());
-            cq->callAvailable();
-            if(ros::ok() && funcToCall_){
+            calls=callAvailableOneByOne(cq, target += period);
+            if(ros::ok() && func_available){
                 funcToCall_();
-                ++calls;
+                calls+=1;
             }
-            measureAndSaveEndTime(calls);
-            //    return;
-            //});
-            //thr.join();
+            if(calls > 0)
+                measureAndSaveEndTime(calls);
 
-            if(useCompanionThread_){
-                {
-                    std::lock_guard<std::mutex> lk(wakeup_mtx);
-                    compThrReady=false;
-                }
-                flag.clear();
-                pthread_yield();
-            }
+            if(useCompanionThread_)
+                suspendCompanionThread();
 
-            // We don't want this part to cut execution of others
-            // when we are using rtg-sync
-            std::this_thread::sleep_until(target += period);
+            std::this_thread::sleep_until(target);
         }
     }
 
     joinThreads();
 
     ROS_INFO("Stoppped spinning.");
+}
+
+int TimeProfilingSpinner::callAvailableOneByOne(
+        ros::CallbackQueue *cq,
+        std::chrono::system_clock::time_point timeout,
+        ros::WallDuration cbWaitTime)
+{
+    int calls=0;
+    ros::CallbackQueue::CallOneResult cor = ros::CallbackQueue::Called;
+    while(ros::ok() &&
+          std::chrono::system_clock::now() < timeout &&
+          cor != ros::CallbackQueue::Disabled &&
+          cor != ros::CallbackQueue::Empty)
+    {
+        cor = cq->callOne(cbWaitTime);
+        if(cor == ros::CallbackQueue::Called)
+            ++calls;
+    }
+
+    return calls;
 }
 
 void TimeProfilingSpinner::startCompanionThread()
@@ -273,13 +295,35 @@ void TimeProfilingSpinner::startCompanionThread()
 //                             TimeProfilingSpinner::companionSpinner, NULL);
     int ret = pthread_create(&comp_thr, NULL,
                              TimeProfilingSpinner::companionSpinner, NULL);
+    pthread_yield(); // Let companion to execute until it comes to condition variable.
     if(ret != 0){
         std::cerr << "Companion thread creation failed\n" << strerror(errno) << std ::endl;
     }
     else
         ROS_INFO("Companion thread created.");
 
-//    pthread_attr_destroy(&comp_thr_attr);
+    //    pthread_attr_destroy(&comp_thr_attr);
+}
+
+void TimeProfilingSpinner::wakeupCompanionThread()
+{
+    flag.test_and_set();
+    {
+        std::lock_guard<std::mutex> lk(wakeup_mtx);
+        compThrReady=true;
+    }
+    wakeup_cv.notify_one();
+    pthread_yield();
+}
+
+void TimeProfilingSpinner::suspendCompanionThread()
+{
+    {
+        std::lock_guard<std::mutex> lk(wakeup_mtx);
+        compThrReady=false;
+    }
+    flag.clear();
+    pthread_yield();
 }
 
 void TimeProfilingSpinner::saveProfilingData(){
@@ -295,34 +339,50 @@ void TimeProfilingSpinner::saveProfilingData(){
 
     ROS_INFO("Starting to write profiling data to file.");
 
-    std::ofstream outfile("./" + ros::this_node::getName()
-                          + fname_post_ + "_timing.csv");
+    std::stringstream ss;
+    auto num_lines=0;
 
     if(flipped_){
         for(int i=bufIndex_; i<bufSize_; ++i){
-            outfile << m_time_start_buf_[i] << ","
-                    << m_time_end_buf_[i] << ","
-                    << t_cpu_time_diff_buf_[i] << ","
-                    << static_cast<long>(callback_called_buf_[i]) <<","
-                    << static_cast<long>(start_cpuid_buf_[i]) <<","
-                    << static_cast<long>(end_cpuid_buf_[i]) << std::endl;
+            ss << m_time_start_buf_[i] << ","
+               << m_time_end_buf_[i] << ","
+               << t_cpu_time_diff_buf_[i] << ","
+               << static_cast<long>(callback_called_buf_[i]) <<","
+               << static_cast<long>(start_cpuid_buf_[i]) <<","
+               << static_cast<long>(end_cpuid_buf_[i]) << std::endl;
+            ++num_lines;
         }
     }
+    
     for(int i=0; i<bufIndex_; ++i){
-        outfile << m_time_start_buf_[i] << ","
-                << m_time_end_buf_[i] << ","
-                << t_cpu_time_diff_buf_[i] << ","
-                << static_cast<long>(callback_called_buf_[i]) <<","
-                << static_cast<long>(start_cpuid_buf_[i]) <<","
-                << static_cast<long>(end_cpuid_buf_[i]) << std::endl;
+        ss << m_time_start_buf_[i] << ","
+           << m_time_end_buf_[i] << ","
+           << t_cpu_time_diff_buf_[i] << ","
+           << static_cast<long>(callback_called_buf_[i]) <<","
+           << static_cast<long>(start_cpuid_buf_[i]) <<","
+           << static_cast<long>(end_cpuid_buf_[i]) << std::endl;
+        ++num_lines;
     }
+
+    std::ofstream outfile("./" + ros::this_node::getName()
+                          + fname_post_ + "_timing.csv");
+    
+    // Skip first 32 and last 16 samples
+    auto firstToSkip=32, lastToSkip=16;
+    // read from string stream and dump to file
+    std::string line;
+    for(auto l=0; l<num_lines-lastToSkip; ++l){
+        std::getline(ss, line);
+        if(l > firstToSkip)
+            outfile << line << std::endl;
+    }
+
     file_saved_=true;
     ROS_INFO("Done writing profile data.");
 }
 
 void TimeProfilingSpinner::joinThreads()
 {
-
     if(useCompanionThread_){
         {
             std::lock_guard<std::mutex> lk(wakeup_mtx);
@@ -333,6 +393,21 @@ void TimeProfilingSpinner::joinThreads()
         pthread_join(comp_thr, NULL);
     }
 
+}
+
+void TimeProfilingSpinner::decreasePriority()
+{
+    static const sched_param lowest_rt_prio_sp = {
+        .sched_priority=1
+    };
+    if(sched_setparam(0, &lowest_rt_prio_sp) < 0)
+        perror("decreasePriority, sched_setparam error");
+}
+
+void TimeProfilingSpinner::regainPriority()
+{
+    if(sched_setparam(0, &spinner_sched_param_) < 0)
+        perror("regainPriority, sched_setparam error");
 }
 
 void TimeProfilingSpinner::saveProfilingDataOfAllCreatedObjects()

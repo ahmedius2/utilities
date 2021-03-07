@@ -50,6 +50,7 @@ class mutex;
 
 namespace ros {
 class CallbackQueue;
+class WallDuration;
 }
 
 #define USE_DEFAULT_CALLBACK_FREQ 0
@@ -78,11 +79,24 @@ public:
 
     void spinAndProfileUntilShutdown();
 
+    int callAvailableOneByOne(
+            ros::CallbackQueue* cq,
+            std::chrono::system_clock::time_point timeout,
+            ros::WallDuration cbWaitTime = ros::WallDuration());
+
     void startCompanionThread();
+
+    void wakeupCompanionThread();
+
+    void suspendCompanionThread();
 
     void saveProfilingData();
 
     void joinThreads();
+
+    void decreasePriority();
+
+    void regainPriority();
 
     // Most likely, there will be only one object.
     // This function is added to the class due to ros::shutdown problem.
@@ -115,6 +129,8 @@ private:
     static volatile bool compThrReady;
     bool synchronizedStart_;
     bool useCompanionThread_;
+
+    sched_param spinner_sched_param_;
 
 //    inline void get_thread_cputime(double& seconds);
     inline void get_thread_cputime(long& microseconds);
